@@ -1,9 +1,10 @@
 import React, { useMemo, useState } from 'react';
 import { Bar, BarChart, CartesianGrid, Cell, Legend, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { useStore } from '../store.jsx';
-import { Empty, Modal, Section, Stat, downloadCSV, inr, inrPrecise, num } from '../components/ui.jsx';
+import { Empty, Modal, Section, Stat, inr, inrPrecise, num } from '../components/ui.jsx';
 import { addDays, allSummaries, daysLeft, projection } from '../lib/logic.js';
 import { summarizeHistoricalPurchasesAndTransfers } from '../lib/reporting.js';
+import { createInvoicePdf } from '../lib/invoice.js';
 
 const STATUS_COLOR = { Normal: '#16a34a', Monitor: '#0ea5e9', Warning: '#d97706', Critical: '#dc2626', Expired: '#7f1d1d' };
 
@@ -36,7 +37,7 @@ function WeekTick({ x, y, payload }) {
 }
 
 export default function Reports() {
-  const { state, today, scope } = useStore();
+  const { state, today, scope, notify } = useStore();
   const [from, setFrom] = useState(addDays(today, -90));
   const [to, setTo] = useState(addDays(today, 0));
   const [statusView, setStatusView] = useState(null);
@@ -166,18 +167,79 @@ export default function Reports() {
     month, label, purchaseDiscount, transferDiscount, purchaseOriginalValue, purchaseDiscountedValue,
   }));
 
-  const exportBatches = () => downloadCSV('mediclock_batches.csv', [['Clinic', 'Medicine', 'Batch', 'Quantity', 'Unit', 'Expiry', 'Days left', 'Status', 'Daily use', 'Projected surplus (estimate)', 'Unit cost (illustrative INR)'],
-    ...r.withP.map(({ b, p }) => [cname(b.clinicId), b.name, b.batchNo, b.qty, b.unit, b.expiry, p.days, p.status, b.daily, p.surplus, b.unitCost])]);
-  const exportTransfers = () => downloadCSV('mediclock_transfers.csv', [['ID', 'Status', 'From', 'To', 'Medicine', 'Batch', 'Quantity', 'Unit', 'Created', 'Completed', 'Estimated value (illustrative INR)'],
-    ...state.transfers.map((t) => [t.id, t.status, cname(t.fromClinic), cname(t.toClinic), t.medicineName, t.batchNo, t.qty, t.unit, t.createdAt, t.completedAt || '', t.qty * t.unitCost])]);
-  const exportShort = () => downloadCSV('mediclock_shortages.csv', [['Clinic', 'Medicine', 'Stock', 'Required', 'Shortage', 'Days of stock'], ...r.shortages.map((s) => [cname(s.clinicId), s.name, s.stock, s.required, s.shortage, s.daysOfStock ?? ''])]);
+  const invoiceItems = (purchaseTransferAnalysis.selected?.month ? purchaseTransferAnalysis.selectedPurchases : []).flatMap((purchase) =>
+    (purchase.deliveries || []).filter((delivery) => delivery.date.startsWith(purchaseTransferAnalysis.selected.month)).map((delivery) => {
+      const quantity = Number(delivery.quantity) || 0;
+      const unitPrice = Number(delivery.finalUnitPrice ?? delivery.originalUnitPrice ?? purchase.unitPrice) || 0;
+      return {
+        purchaseId: purchase.id,
+        medicineId: purchase.medicineId,
+        medicineName: purchase.medicineName,
+        supplier: purchase.supplier || 'Not recorded',
+        clinic: cname(purchase.clinicId),
+        date: delivery.date,
+        quantity,
+        unit: purchase.unit,
+        unitPrice,
+        gross: Number(delivery.originalValue ?? (quantity * (Number(delivery.originalUnitPrice ?? purchase.unitPrice) || 0))),
+        discount: Number(delivery.discountTotal ?? (quantity * (Number(delivery.discountAmount) || 0))),
+        net: Number(delivery.actualExpense ?? delivery.discountedValue ?? (quantity * unitPrice)),
+      };
+    }));
+
+  const downloadInvoice = () => {
+    const selectedMonth = purchaseTransferAnalysis.selected?.month;
+    if (!selectedMonth || invoiceItems.length === 0) return;
+    try {
+      const bytes = createInvoicePdf({
+        invoiceNumber: `MC-HIST-${selectedMonth}-${scope === 'all' ? 'ALL' : scope}`,
+        period: MONTH_LABELS[selectedMonth] || selectedMonth,
+        clinicScope: scope === 'all' ? 'All clinics' : cname(scope),
+        generatedAt: today,
+        items: invoiceItems,
+      });
+      const url = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }));
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `mediclock-invoice-summary-${selectedMonth}-${scope === 'all' ? 'all-clinics' : scope}.pdf`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (error) {
+      notify(`Could not create the invoice PDF: ${error.message}`, 'error');
+    }
+  };
 
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-end justify-between gap-2">
         <div><h1 className="text-xl font-semibold text-navy-900">Reports and impact</h1><p className="text-sm text-black">Expiry risk, shortages and redistribution results.</p></div>
-        <div className="flex flex-wrap gap-2"><button className="btn-ghost" onClick={exportBatches}>Export batches CSV</button><button className="btn-ghost" onClick={exportTransfers}>Export transfers CSV</button><button className="btn-ghost" onClick={exportShort}>Export shortages CSV</button></div>
       </div>
+      <Section title="Create invoice PDF">
+        <div className="flex flex-wrap items-end justify-between gap-4 p-3">
+          <div className="max-w-2xl text-xs text-black">
+            <p>Create a purchase invoice summary from delivered historical records for the selected month.</p>
+            <p className="mt-1">This is simulated demo data, not a supplier-issued legal invoice or proof of payment.</p>
+          </div>
+          <div className="flex flex-wrap items-end gap-3">
+            <label className="block min-w-44 text-xs font-medium text-black">
+              Invoice month
+              <select className="input mt-1" value={analysisMonth} onChange={(e) => setAnalysisMonth(e.target.value)}>
+                {(state.historicalDemo?.months || []).map((month) => <option key={month} value={month}>{MONTH_LABELS[month] || month}</option>)}
+              </select>
+            </label>
+            <button className="btn-primary" onClick={downloadInvoice} disabled={invoiceItems.length === 0}>
+              Create and download PDF
+            </button>
+          </div>
+          <p className="w-full text-xs text-black">
+            {invoiceItems.length
+              ? `${invoiceItems.length} delivered item${invoiceItems.length === 1 ? '' : 's'} · modeled expenditure ${inrPrecise(invoiceItems.reduce((sum, item) => sum + item.net, 0))}`
+              : 'No delivered purchase items are available for this month.'}
+          </p>
+        </div>
+      </Section>
       <div className="card grid gap-2 p-3 sm:grid-cols-2">
         <label className="flex items-center gap-2 text-xs text-black">From<input className="input" type="date" value={from} onChange={(e) => setFrom(e.target.value)} /></label>
         <label className="flex items-center gap-2 text-xs text-black">To<input className="input" type="date" value={to} onChange={(e) => setTo(e.target.value)} /></label>
@@ -253,12 +315,6 @@ export default function Reports() {
               Completed transfers are counted once from the transfer archive, not from paired send/receive movements.
               {scope !== 'all' && <> Current clinic filter: {cname(scope)}; network transfers involving that clinic are included.</>}
             </p>
-            <label className="block min-w-44 text-xs font-medium text-black">
-              Selected month
-              <select className="input mt-1" value={analysisMonth} onChange={(e) => setAnalysisMonth(e.target.value)}>
-                {(state.historicalDemo?.months || []).map((month) => <option key={month} value={month}>{MONTH_LABELS[month] || month}</option>)}
-              </select>
-            </label>
           </div>
           {!purchaseTransferAnalysis.selected ? <Empty title="No historical purchase or transfer data" hint="The selected archive contains no monthly records." /> : <>
             <div className="grid grid-cols-2 gap-3 md:grid-cols-5">
