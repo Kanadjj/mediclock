@@ -1,4 +1,6 @@
 // MediClock core logic. Pure functions, no React, no browser APIs. All data is fictional.
+import { DEFAULT_DISCOUNT_CONFIG, calculateBatchDiscount, discountedTotal, validateDiscountTiers } from './discounts.js';
+
 export const DAY_MS = 86400000;
 export const SAFETY_MARGIN_DAYS = 3; // transfer must land this many days before expiry
 export const SHORTAGE_HORIZON_DAYS = 14; // required stock >= daily use x 14 days (or minimum level, if higher)
@@ -248,6 +250,12 @@ export function migrateStateData(data) {
   if (!data || data.version !== 1 || !Array.isArray(data.batches)) return null;
   const seq = { transfer: 1, batch: data.batches.length + 1, activity: 1, clinic: 1, user: 1, purchase: 1, notification: 1, ...(data.seq || {}) };
   for (const key of Object.keys(seq)) if (!Number.isInteger(seq[key]) || seq[key] < 1) seq[key] = 1;
+  const discountConfig = data.discountConfig && !validateDiscountTiers(data.discountConfig.tiers)
+    ? data.discountConfig : structuredClone(DEFAULT_DISCOUNT_CONFIG);
+  const purchases = (Array.isArray(data.purchases) ? data.purchases : []).map((purchase) => ({
+    ...purchase,
+    discountConfigSnapshot: purchase.discountConfigSnapshot || structuredClone(discountConfig),
+  }));
   return {
     ...data,
     clinics: Array.isArray(data.clinics) ? data.clinics : [],
@@ -256,8 +264,9 @@ export function migrateStateData(data) {
     audit: Array.isArray(data.audit) ? data.audit : [],
     activity: Array.isArray(data.activity) ? data.activity : [],
     reorderSettings: Array.isArray(data.reorderSettings) ? data.reorderSettings : [],
-    purchases: Array.isArray(data.purchases) ? data.purchases : [],
+    purchases,
     notifications: Array.isArray(data.notifications) ? data.notifications : [],
+    discountConfig,
     seq,
   };
 }
@@ -305,6 +314,8 @@ export function evaluateReorders(state, today, targets) {
       quantity: setting.reorderQuantity, unitPrice: setting.unitPrice, estimatedCost: setting.reorderQuantity * setting.unitPrice,
       supplier: setting.supplier, supplierContact: setting.supplierContact || '',
       requestedAt: new Date().toISOString(), status: 'Pending Approval', receivedQty: 0, actualExpense: 0,
+      discountConfigSnapshot: structuredClone(state.discountConfig || DEFAULT_DISCOUNT_CONFIG),
+      discountAmount: 0,
       history: [{ status: 'Reorder Required', at: new Date().toISOString(), by: 'MediClock', note: `Available stock ${stock.available} reached threshold ${setting.threshold}.` },
         { status: 'Pending Approval', at: new Date().toISOString(), by: 'MediClock', note: 'Automatic purchase request generated.' }],
       deliveries: [],
@@ -315,6 +326,29 @@ export function evaluateReorders(state, today, targets) {
     log(state, 'purchase', `MediClock generated ${p.id}: ${p.quantity} ${p.unit} ${p.medicineName} at ${cname(state, p.clinicId)} (estimated ${p.estimatedCost}).`);
   }
   return state;
+}
+
+export function configureDiscounts(state, tiers, user) {
+  if (user?.role !== 'Administrator') return fail('Only administrators can configure expiry discounts.');
+  const error = validateDiscountTiers(tiers);
+  if (error) return fail(error);
+  const s = clone(state);
+  s.discountConfig = { tiers: tiers.map((tier, index) => ({
+    id: String(tier.id || `tier-${index + 1}`),
+    minDays: Number(tier.minDays),
+    maxDays: tier.maxDays === '' || tier.maxDays == null ? null : Number(tier.maxDays),
+    percent: Number(tier.percent),
+  })) };
+  log(s, 'system', `${user.name} updated expiry-based discount tiers.`);
+  return ok(s);
+}
+
+export function resetDiscounts(state, user) {
+  if (user?.role !== 'Administrator') return fail('Only administrators can restore expiry discount defaults.');
+  const s = clone(state);
+  s.discountConfig = structuredClone(DEFAULT_DISCOUNT_CONFIG);
+  log(s, 'system', `${user.name} restored default expiry-based discount tiers.`);
+  return ok(s);
 }
 
 export function configureReorder(state, input, user, today) {
@@ -364,25 +398,33 @@ export function purchaseAction(state, id, action, user, today, details = {}) {
     if (qty > purchaseOutstanding(p)) return fail(`Only ${purchaseOutstanding(p)} ${p.unit} remain on this order.`);
     if (!details.batchNo?.trim()) return fail('Supplier batch number is required.');
     if (!isValidDate(details.expiry) || details.expiry < today) return fail('Enter a valid future expiry date for the delivery.');
+    const pricing = calculateBatchDiscount({ expiry: details.expiry }, p.unitPrice, today, p.discountConfigSnapshot || s.discountConfig || DEFAULT_DISCOUNT_CONFIG);
+    const actualExpense = discountedTotal(qty, pricing);
     p.receivedQty = (p.receivedQty || 0) + qty;
-    p.actualExpense = p.receivedQty * p.unitPrice;
-    const delivery = { quantity: qty, batchNo: details.batchNo.trim(), expiry: details.expiry, date: today, confirmedAt: new Date().toISOString(), confirmedBy: user.name };
+    p.discountAmount = Math.round(((p.discountAmount || 0) + qty * pricing.discountAmount) * 100) / 100;
+    p.actualExpense = Math.round(((p.actualExpense || 0) + actualExpense) * 100) / 100;
+    const delivery = { quantity: qty, batchNo: details.batchNo.trim(), expiry: details.expiry, date: today, confirmedAt: new Date().toISOString(), confirmedBy: user.name,
+      ...pricing, originalValue: Math.round(qty * pricing.originalUnitPrice * 100) / 100,
+      discountedValue: actualExpense, actualExpense, discountTotal: Math.round(qty * pricing.discountAmount * 100) / 100 };
     p.deliveries.push(delivery);
     const batches = s.batches.filter((b) => b.clinicId === p.clinicId && b.medicineId === p.medicineId && daysLeft(b.expiry, today) >= 0);
     const same = batches.find((b) => b.batchNo.toLowerCase() === delivery.batchNo.toLowerCase() && b.expiry === delivery.expiry);
-    if (same) same.qty += qty;
+    if (same) {
+      same.unitCost = Math.round(((same.qty * same.unitCost + qty * pricing.finalUnitPrice) / (same.qty + qty)) * 100) / 100;
+      same.qty += qty;
+    }
     else {
       const template = batches[0] || state.batches.find((b) => b.clinicId === p.clinicId && b.medicineId === p.medicineId);
       if (!template) return fail('Medicine batch details are unavailable for this clinic.');
       const dailyTotal = batches.reduce((n, b) => n + b.daily, 0), currentQty = batches.reduce((n, b) => n + b.qty, 0);
-      const batch = { ...template, id: 'B-' + String(s.seq.batch++).padStart(4, '0'), batchNo: delivery.batchNo, qty, expiry: delivery.expiry, unitCost: p.unitPrice, daily: 0 };
+      const batch = { ...template, id: 'B-' + String(s.seq.batch++).padStart(4, '0'), batchNo: delivery.batchNo, qty, expiry: delivery.expiry, unitCost: pricing.finalUnitPrice, daily: 0 };
       s.batches.push(batch);
       const group = s.batches.filter((b) => b.clinicId === p.clinicId && b.medicineId === p.medicineId && daysLeft(b.expiry, today) >= 0);
       const total = currentQty + qty;
       if (dailyTotal > 0 && total > 0) group.forEach((b) => { b.daily = Math.round(((dailyTotal * b.qty) / total) * 100) / 100; });
     }
     p.status = purchaseOutstanding(p) === 0 ? 'Received' : 'Partially Received';
-    addPurchaseHistory(p, p.status, user, `Confirmed delivery of ${qty} ${p.unit}; actual expense ${qty * p.unitPrice}.`);
+    addPurchaseHistory(p, p.status, user, `Confirmed delivery of ${qty} ${p.unit}; actual expense ${actualExpense} after ${pricing.discountPercent}% expiry discount.`);
     const msg = `${p.id}: ${qty} ${p.unit} ${p.medicineName} delivery ${p.status === 'Received' ? 'confirmed' : 'partially received'}.`;
     notifyPurchase(s, p, msg, p.status === 'Received' ? 'received' : 'partial');
     log(s, 'purchase', `${user.name} confirmed receipt of ${qty} ${p.unit} ${p.medicineName} for ${p.id} at ${cname(s, p.clinicId)}.`);
@@ -476,9 +518,14 @@ export function createTransfer(state, rec, user, today) {
   if (qty > live.available) return fail(`Quantity exceeds the ${live.available} ${live.unit} of eligible surplus.`);
   if (qty > live.requested) return fail(`Quantity exceeds the receiving clinic's shortage of ${live.requested}.`);
   const s = clone(state);
+  const pricing = calculateBatchDiscount(b, b.unitCost, today, state.discountConfig || DEFAULT_DISCOUNT_CONFIG);
   const t = { id: 'T-' + String(s.seq.transfer++).padStart(4, '0'), medicineId: live.medicineId, medicineName: live.medicineName, batchId: live.batchId, batchNo: live.batchNo, unit: live.unit,
     fromClinic: live.fromClinic, toClinic: live.toClinic, qty, expiry: live.expiry, deadline: live.deadline, distanceKm: live.distanceKm, travelMin: live.travelMin,
-    status: 'Awaiting sending approval', createdAt: new Date().toISOString(), unitCost: b.unitCost, history: [] };
+    status: 'Awaiting sending approval', createdAt: new Date().toISOString(), unitCost: b.unitCost,
+    pricing, originalValue: Math.round(qty * pricing.originalUnitPrice * 100) / 100,
+    discountTotal: Math.round(qty * pricing.discountAmount * 100) / 100,
+    discountedValue: discountedTotal(qty, pricing),
+    history: [] };
   t.history.push({ ts: t.createdAt, status: 'Suggested', by: 'MediClock', note: 'Recommendation generated' }, { ts: t.createdAt, status: t.status, by: user.name, note: 'Transfer request raised' });
   s.transfers.unshift(t);
   appendAudit(s, { transferId: t.id, action: 'created', by: user.name, role: user.role, detail: `${qty} ${t.unit} ${t.medicineName} batch ${t.batchNo}: ${cname(s, t.fromClinic)} -> ${cname(s, t.toClinic)}` });

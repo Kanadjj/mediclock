@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { Bar, BarChart, CartesianGrid, Cell, Legend, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { useStore } from '../store.jsx';
-import { Empty, Modal, Section, Stat, downloadCSV, inr, num } from '../components/ui.jsx';
+import { Empty, Modal, Section, Stat, downloadCSV, inr, inrPrecise, num } from '../components/ui.jsx';
 import { addDays, allSummaries, daysLeft, projection } from '../lib/logic.js';
 import { summarizeHistoricalPurchasesAndTransfers } from '../lib/reporting.js';
 
@@ -115,15 +115,29 @@ export default function Reports() {
   const purchaseTransferAnalysis = useMemo(() => {
     const data = summarizeHistoricalPurchasesAndTransfers(state.historicalDemo, scope);
     const selected = data.months.find((row) => row.month === analysisMonth) || data.months[data.months.length - 1];
-    const selectedPurchases = data.purchaseRecords.filter((p) => (p.requestedAt || p.date || '').startsWith(selected?.month || '')).map((purchase) => {
+    const selectedRequests = data.purchaseRecords.filter((p) => (p.requestedAt || p.date || '').startsWith(selected?.month || ''));
+    const selectedPurchases = data.purchaseRecords.filter((purchase) =>
+      (purchase.requestedAt || purchase.date || '').startsWith(selected?.month || '')
+      || (purchase.deliveries || []).some((delivery) => delivery.date.startsWith(selected?.month || ''))).map((purchase) => {
       const deliveries = (purchase.deliveries || []).filter((delivery) => delivery.date.startsWith(selected?.month || ''));
       return {
         ...purchase,
         reportReceivedQty: deliveries.reduce((sum, delivery) => sum + (Number(delivery.quantity) || 0), 0),
-        reportActualExpense: deliveries.reduce((sum, delivery) => sum + (Number(delivery.quantity) || 0) * (Number(purchase.unitPrice) || 0), 0),
+        reportActualExpense: deliveries.reduce((sum, delivery) => sum + Number(delivery.actualExpense ?? ((Number(delivery.quantity) || 0) * Number(delivery.finalUnitPrice ?? purchase.unitPrice))), 0),
+        reportDiscount: deliveries.reduce((sum, delivery) => sum + Number(delivery.discountTotal ?? ((Number(delivery.quantity) || 0) * Number(delivery.discountAmount || 0))), 0),
+        reportOriginalValue: deliveries.reduce((sum, delivery) => sum + Number(delivery.originalValue ?? ((Number(delivery.quantity) || 0) * Number(delivery.originalUnitPrice ?? purchase.unitPrice))), 0),
       };
     });
     const selectedTransfers = data.transfers.filter((t) => t.reportDate.startsWith(selected?.month || ''));
+    const selectedMedicineDiscounts = new Map();
+    const addDiscount = (id, name, key, amount) => {
+      const medicineKey = id || name;
+      const row = selectedMedicineDiscounts.get(medicineKey) || { medicineId: id, medicineName: name, purchaseDiscount: 0, transferDiscount: 0 };
+      row[key] += amount;
+      selectedMedicineDiscounts.set(medicineKey, row);
+    };
+    selectedPurchases.forEach((purchase) => addDiscount(purchase.medicineId, purchase.medicineName, 'purchaseDiscount', purchase.reportDiscount));
+    selectedTransfers.forEach((transfer) => addDiscount(transfer.medicineId, transfer.medicineName, 'transferDiscount', Number(transfer.discountTotal) || 0));
     const selectedMedicineTotals = new Map();
     selectedTransfers.forEach((transfer) => {
       const key = transfer.medicineId || transfer.medicineName;
@@ -137,8 +151,9 @@ export default function Reports() {
       selectedMedicineTotals.set(key, item);
     });
     return {
-      ...data, selected, selectedPurchases, selectedTransfers,
+      ...data, selected, selectedPurchases, selectedRequests, selectedTransfers,
       selectedMedicineTotals: [...selectedMedicineTotals.values()].sort((a, b) => a.medicineName.localeCompare(b.medicineName)),
+      selectedMedicineDiscounts: [...selectedMedicineDiscounts.values()].sort((a, b) => a.medicineName.localeCompare(b.medicineName)),
     };
   }, [state.historicalDemo, scope, analysisMonth]);
 
@@ -147,6 +162,9 @@ export default function Reports() {
   }));
   const transferCountChart = purchaseChart.map(({ month, label, completedTransfers }) => ({ month, label, completedTransfers }));
   const transferQuantityChart = purchaseChart.map(({ month, label, quantityTransferred }) => ({ month, label, quantityTransferred }));
+  const discountChart = purchaseChart.map(({ month, label, purchaseDiscount, transferDiscount, purchaseOriginalValue, purchaseDiscountedValue }) => ({
+    month, label, purchaseDiscount, transferDiscount, purchaseOriginalValue, purchaseDiscountedValue,
+  }));
 
   const exportBatches = () => downloadCSV('mediclock_batches.csv', [['Clinic', 'Medicine', 'Batch', 'Quantity', 'Unit', 'Expiry', 'Days left', 'Status', 'Daily use', 'Projected surplus (estimate)', 'Unit cost (illustrative INR)'],
     ...r.withP.map(({ b, p }) => [cname(b.clinicId), b.name, b.batchNo, b.qty, b.unit, b.expiry, p.days, p.status, b.daily, p.surplus, b.unitCost])]);
@@ -231,7 +249,7 @@ export default function Reports() {
           <div className="flex flex-wrap items-end justify-between gap-3">
             <p className="max-w-3xl text-xs text-black">
               Simulated historical demo records only; live purchase orders, transfers, and inventory are excluded.
-              Purchase requests are grouped by request date, while received quantities and actual expenses are grouped by confirmed delivery date.
+              Purchase requests are grouped by request date, while received quantities and modeled delivery expenses are grouped by confirmed delivery date. No supplier payments are tracked.
               Completed transfers are counted once from the transfer archive, not from paired send/receive movements.
               {scope !== 'all' && <> Current clinic filter: {cname(scope)}; network transfers involving that clinic are included.</>}
             </p>
@@ -247,13 +265,13 @@ export default function Reports() {
               <Stat label="Purchase requests" value={purchaseTransferAnalysis.selected.requests} tone="navy" />
               <Stat label="Quantity ordered" value={num(purchaseTransferAnalysis.selected.quantityOrdered)} tone="teal" />
               <Stat label="Quantity received this month" value={num(purchaseTransferAnalysis.selected.quantityReceived)} tone="green" />
-              <Stat label="Actual purchase expenditure" value={inr(purchaseTransferAnalysis.selected.actualExpense)} tone="green" />
+              <Stat label="Actual purchase expenditure" value={inrPrecise(purchaseTransferAnalysis.selected.actualExpense)} sub="Modeled from confirmed demo deliveries" tone="green" />
               <Stat label="Completed transfers" value={purchaseTransferAnalysis.selected.completedTransfers} sub={`${num(purchaseTransferAnalysis.selected.quantityTransferred)} units transferred`} tone="teal" />
             </div>
 
             <div className="grid gap-4 lg:grid-cols-2">
               <Section title="Monthly actual purchase expenditure (₹)">
-                <div className="h-64 p-3"><ResponsiveContainer width="100%" height="100%"><BarChart data={purchaseChart}><CartesianGrid strokeDasharray="3 3" vertical={false} /><XAxis dataKey="label" fontSize={10} /><YAxis fontSize={11} /><Tooltip formatter={(value) => inr(value)} /><Bar dataKey="actualExpense" name="Actual expense" fill="#0f8b8d" /></BarChart></ResponsiveContainer></div>
+                <div className="h-64 p-3"><ResponsiveContainer width="100%" height="100%"><BarChart data={purchaseChart}><CartesianGrid strokeDasharray="3 3" vertical={false} /><XAxis dataKey="label" fontSize={10} /><YAxis fontSize={11} /><Tooltip formatter={(value) => inrPrecise(value)} /><Bar dataKey="actualExpense" name="Modeled expense" fill="#0f8b8d" /></BarChart></ResponsiveContainer></div>
               </Section>
               <Section title="Purchase quantity: requested vs received">
                 <div className="h-64 p-3"><ResponsiveContainer width="100%" height="100%"><BarChart data={purchaseChart}><CartesianGrid strokeDasharray="3 3" vertical={false} /><XAxis dataKey="label" fontSize={10} /><YAxis fontSize={11} /><Tooltip /><Legend /><Bar dataKey="quantityOrdered" name="Quantity ordered" fill="#0f8b8d" /><Bar dataKey="quantityReceived" name="Quantity received" fill="#16a34a" /></BarChart></ResponsiveContainer></div>
@@ -266,12 +284,39 @@ export default function Reports() {
               </Section>
             </div>
 
+            <Section title="Expiry discount analysis — simulated demo savings">
+              <p className="px-4 pt-3 text-xs text-black">Discounts are historical calculated values saved with each simulated transaction. They are illustrative savings, not cash payments or realized cash savings.</p>
+              <div className="grid grid-cols-2 gap-3 p-4 md:grid-cols-4">
+                <Stat label="Purchase discounts" value={inrPrecise(purchaseTransferAnalysis.discountTotals.purchaseDiscount)} tone="teal" />
+                <Stat label="Transfer discounts" value={inrPrecise(purchaseTransferAnalysis.discountTotals.transferDiscount)} sub="Illustrative, not cash" tone="amber" />
+                <Stat label="Selected-month purchase discount" value={inrPrecise(purchaseTransferAnalysis.selected.purchaseDiscount)} tone="teal" />
+                <Stat label="Selected-month transfer discount" value={inrPrecise(purchaseTransferAnalysis.selected.transferDiscount)} sub="Illustrative, not cash" tone="amber" />
+              </div>
+              <div className="grid gap-4 lg:grid-cols-2">
+                <Section title="Monthly purchase and transfer discount amounts (₹)">
+                  <div className="h-64 p-3"><ResponsiveContainer width="100%" height="100%"><BarChart data={discountChart}><CartesianGrid strokeDasharray="3 3" vertical={false} /><XAxis dataKey="label" fontSize={10} /><YAxis fontSize={11} /><Tooltip formatter={(value) => inrPrecise(value)} /><Legend /><Bar dataKey="purchaseDiscount" name="Purchase discounts" fill="#0f8b8d" /><Bar dataKey="transferDiscount" name="Transfer discounts" fill="#d97706" /></BarChart></ResponsiveContainer></div>
+                </Section>
+                <Section title={`${MONTH_LABELS[purchaseTransferAnalysis.selected.month] || purchaseTransferAnalysis.selected.month}: medicine-wise discounts`}>
+                  {purchaseTransferAnalysis.selectedMedicineDiscounts.length === 0 ? <Empty title="No discount records this month" /> : <div className="overflow-x-auto"><table className="w-full"><thead className="border-b bg-slate-50"><tr>{['Medicine', 'Purchase discount', 'Transfer discount'].map((h) => <th className="th" key={h}>{h}</th>)}</tr></thead><tbody className="divide-y">
+                    {purchaseTransferAnalysis.selectedMedicineDiscounts.map((row) => <tr key={row.medicineId}><td className="td">{row.medicineName}</td><td className="td tabular-nums">{inrPrecise(row.purchaseDiscount)}</td><td className="td tabular-nums">{inrPrecise(row.transferDiscount)}</td></tr>)}
+                  </tbody></table></div>}
+                </Section>
+              </div>
+              <div className="overflow-x-auto border-t"><table className="w-full min-w-[54rem]">
+                <thead className="border-b bg-slate-50"><tr>{['Month', 'Purchase original value', 'Purchase value after discount', 'Purchase discount', 'Transfer original value', 'Transfer discounted value', 'Transfer discount'].map((h) => <th className="th" key={h}>{h}</th>)}</tr></thead>
+                <tbody className="divide-y">{purchaseTransferAnalysis.months.map((row) => <tr key={row.month}><td className="td whitespace-nowrap">{MONTH_LABELS[row.month] || row.month}</td>
+                  <td className="td tabular-nums">{inrPrecise(row.purchaseOriginalValue)}</td><td className="td tabular-nums">{inrPrecise(row.purchaseDiscountedValue)}</td><td className="td tabular-nums">{inrPrecise(row.purchaseDiscount)}</td>
+                  <td className="td tabular-nums">{inrPrecise(row.transferOriginalValue)}</td><td className="td tabular-nums">{inrPrecise(row.transferDiscountedValue)}</td><td className="td tabular-nums">{inrPrecise(row.transferDiscount)}</td>
+                </tr>)}</tbody>
+              </table></div>
+            </Section>
+
             <div className="grid gap-4 lg:grid-cols-2">
               <Section title={`${MONTH_LABELS[purchaseTransferAnalysis.selected.month] || purchaseTransferAnalysis.selected.month} purchase status breakdown`}>
                 {Object.keys(purchaseTransferAnalysis.selected.statuses).length === 0 ? <Empty title="No purchase requests this month" /> : (
                   <div className="overflow-x-auto"><table className="w-full"><thead className="border-b bg-slate-50"><tr>{['Status', 'Requests', 'Quantity ordered'].map((h) => <th className="th" key={h}>{h}</th>)}</tr></thead>
                     <tbody className="divide-y">{Object.entries(purchaseTransferAnalysis.selected.statuses).map(([status, count]) => {
-                      const quantity = purchaseTransferAnalysis.selectedPurchases.filter((p) => p.status === status).reduce((sum, p) => sum + Number(p.quantity ?? p.requestedQty ?? 0), 0);
+                      const quantity = purchaseTransferAnalysis.selectedRequests.filter((p) => p.status === status).reduce((sum, p) => sum + Number(p.quantity ?? p.requestedQty ?? 0), 0);
                       return <tr key={status}><td className="td">{status}</td><td className="td tabular-nums">{count}</td><td className="td tabular-nums">{num(quantity)}</td></tr>;
                     })}</tbody>
                   </table></div>
@@ -296,13 +341,13 @@ export default function Reports() {
                       <td className="td">{p.medicineName}</td><td className="td">{cname(p.clinicId)}</td><td className="td">{p.supplier}</td>
                       <td className="td tabular-nums">{num(p.quantity ?? p.requestedQty)} {p.unit}</td>
                       <td className="td tabular-nums">{num(p.reportReceivedQty)} {p.unit}</td>
-                      <td className="td">{p.status}<div className="text-xs text-black">{inr(p.reportActualExpense)} actual expense this month</div></td>
+                      <td className="td">{p.status}<div className="text-xs text-black">{inrPrecise(p.reportActualExpense)} modeled expense · {inrPrecise(p.reportDiscount)} simulated discount</div></td>
                     </tr>)}
                     {purchaseTransferAnalysis.selectedTransfers.map((t) => <tr key={t.id}>
                       <td className="td">Transfer</td><td className="td whitespace-nowrap">{t.reportDate}</td>
                       <td className="td">{t.medicineName}</td><td className="td">{cname(t.fromClinic)} → {cname(t.toClinic)}</td><td className="td">—</td>
                       <td className="td tabular-nums">{num(t.quantity)} {t.unit}</td><td className="td tabular-nums">{num(t.quantity)} {t.unit}</td>
-                      <td className="td">Completed<div className="text-xs text-black">One completed transfer</div></td>
+                      <td className="td">Completed<div className="text-xs text-black">{inrPrecise(t.discountTotal || 0)} simulated discount</div></td>
                     </tr>)}
                   </tbody>
                 </table>
@@ -311,12 +356,12 @@ export default function Reports() {
             </Section>
 
             <Section title="July–October 2026 monthly comparison">
-              <div className="overflow-x-auto"><table className="w-full min-w-[54rem]">
-                <thead className="border-b bg-slate-50"><tr>{['Month', 'Purchase requests', 'Quantity ordered', 'Quantity received', 'Actual purchase expenditure', 'Completed transfers', 'Quantity transferred'].map((h) => <th className="th" key={h}>{h}</th>)}</tr></thead>
+              <div className="overflow-x-auto"><table className="w-full min-w-[68rem]">
+                <thead className="border-b bg-slate-50"><tr>{['Month', 'Purchase requests', 'Quantity ordered', 'Quantity received', 'Actual purchase expenditure', 'Purchase discount', 'Completed transfers', 'Quantity transferred', 'Transfer discount'].map((h) => <th className="th" key={h}>{h}</th>)}</tr></thead>
                 <tbody className="divide-y">{purchaseTransferAnalysis.months.map((row) => <tr key={row.month} className={row.month === purchaseTransferAnalysis.selected.month ? 'bg-brand-50/50' : ''}>
                   <td className="td whitespace-nowrap">{MONTH_LABELS[row.month] || row.month}</td><td className="td tabular-nums">{row.requests}</td><td className="td tabular-nums">{num(row.quantityOrdered)}</td>
-                  <td className="td tabular-nums">{num(row.quantityReceived)}</td><td className="td tabular-nums">{inr(row.actualExpense)}</td>
-                  <td className="td tabular-nums">{row.completedTransfers}</td><td className="td tabular-nums">{num(row.quantityTransferred)}</td>
+                  <td className="td tabular-nums">{num(row.quantityReceived)}</td><td className="td tabular-nums">{inrPrecise(row.actualExpense)}</td><td className="td tabular-nums">{inrPrecise(row.purchaseDiscount)}</td>
+                  <td className="td tabular-nums">{row.completedTransfers}</td><td className="td tabular-nums">{num(row.quantityTransferred)}</td><td className="td tabular-nums">{inrPrecise(row.transferDiscount)}</td>
                 </tr>)}</tbody>
               </table></div>
               <p className="border-t px-4 py-2 text-xs text-black">Requests and ordered quantities use request month. Received quantity and actual expenditure use confirmed delivery month. Pending/undelivered quantities are not included in actual expenditure.</p>

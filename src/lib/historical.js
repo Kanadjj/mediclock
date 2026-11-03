@@ -1,4 +1,7 @@
 // Deterministic simulated history for the July-October 2026 demo period.
+import { DEFAULT_DISCOUNT_CONFIG, calculateBatchDiscount, discountedTotal } from './discounts.js';
+
+const datePlusDays = (iso, count) => new Date(Date.parse(`${iso}T00:00:00Z`) + count * 86400000).toISOString().slice(0, 10);
 const MONTHS = [
   { month: '2026-07', days: 31, consumptionFactor: 0.62 },
   { month: '2026-08', days: 31, consumptionFactor: 0.74 },
@@ -144,9 +147,15 @@ export function createHistoricalDemoData(state) {
         fromClinic: plan.fromClinic, toClinic: plan.toClinic, medicineId: plan.medicineId, medicineName: sender.medicineName,
         batchId: source.id, batchNo: source.batchNo, quantity: plan.quantity, qty: plan.quantity,
         unit: sender.unit, status: 'Completed',
+        expiry: source.expiry,
         approvalDate: `${period.month}-09`, dispatchDate: `${period.month}-10`, receiptDate: `${period.month}-11`,
         completedAt: `${period.month}-11T12:00:00.000Z`, simulated: true,
       };
+      const pricing = calculateBatchDiscount(source, source.unitCost, transferDate, DEFAULT_DISCOUNT_CONFIG);
+      transfer.pricing = pricing;
+      transfer.originalValue = Math.round(plan.quantity * pricing.originalUnitPrice * 100) / 100;
+      transfer.discountTotal = Math.round(plan.quantity * pricing.discountAmount * 100) / 100;
+      transfer.discountedValue = discountedTotal(plan.quantity, pricing);
       transfers.push(transfer);
       const transferIn = { ...transfer, id: `${transfer.id}-IN`, type: 'transfer_in', date: transfer.receiptDate, clinicId: transfer.toClinic };
       const transferOut = { ...transfer, id: `${transfer.id}-OUT`, type: 'transfer_out', date: transfer.dispatchDate, clinicId: transfer.fromClinic };
@@ -160,6 +169,7 @@ export function createHistoricalDemoData(state) {
       const id = makeId('HPO', monthIndex, planIndex);
       const requestedAt = `${period.month}-${String(plan.requestDay).padStart(2, '0')}`;
       const receiptDate = plan.deliveryDay ? `${period.month}-${String(plan.deliveryDay).padStart(2, '0')}` : null;
+      const batchExpiry = receiptDate ? datePlusDays(receiptDate, [180, 45, 75, 25, 60, 120, 45, 60][monthIndex * 2 + planIndex]) : null;
       const approvedAt = plan.approvalDay ? `${period.month}-${String(plan.approvalDay).padStart(2, '0')}` : null;
       const placedAt = plan.placedDay ? `${period.month}-${String(plan.placedDay).padStart(2, '0')}` : null;
       const statusHistory = [{ status: 'Pending Approval', date: requestedAt, by: 'MediClock (simulated)' }];
@@ -170,13 +180,27 @@ export function createHistoricalDemoData(state) {
         id, date: requestedAt, requestedAt, clinicId: plan.clinicId, medicineId: plan.medicineId,
         medicineName: group.medicineName, unit: group.unit, quantity: plan.quantity, requestedQty: plan.quantity,
         receivedQty: plan.receivedQty, unitPrice: plan.unitPrice, estimatedCost: plan.quantity * plan.unitPrice,
-        actualExpense: plan.receivedQty * plan.unitPrice, supplier: `${plan.clinicId} Community Medical Supplier`,
+        actualExpense: 0, supplier: `${plan.clinicId} Community Medical Supplier`,
         supplierContact: 'Demo contact only', status: plan.status, simulated: true,
         approvedAt, placedAt, completedAt: plan.receivedQty === plan.quantity ? receiptDate : null,
         rejectedAt: plan.status === 'Rejected' ? approvedAt : null, statusHistory,
-        deliveries: receiptDate ? [{ date: receiptDate, quantity: plan.receivedQty, confirmedAt: `${receiptDate}T12:00:00.000Z`, batchNo: `HDEL-${id}` }] : [],
+        deliveries: [],
         rejectionReason: plan.status === 'Rejected' ? 'Simulated supplier availability issue.' : '',
       };
+      if (receiptDate && plan.receivedQty > 0) {
+        const pricing = calculateBatchDiscount({ expiry: batchExpiry }, plan.unitPrice, receiptDate, DEFAULT_DISCOUNT_CONFIG);
+        const actualExpense = discountedTotal(plan.receivedQty, pricing);
+        const delivery = {
+          date: receiptDate, quantity: plan.receivedQty, confirmedAt: `${receiptDate}T12:00:00.000Z`,
+          batchNo: `HDEL-${id}`, expiry: batchExpiry, ...pricing,
+          originalValue: Math.round(plan.receivedQty * pricing.originalUnitPrice * 100) / 100,
+          discountedValue: actualExpense, discountTotal: Math.round(plan.receivedQty * pricing.discountAmount * 100) / 100,
+          actualExpense, simulated: true,
+        };
+        purchase.deliveries.push(delivery);
+        purchase.discountAmount = delivery.discountTotal;
+        purchase.actualExpense = actualExpense;
+      }
       purchases.push(purchase);
       addTransaction({ id: `${id}-REQUEST`, type: 'purchase_request', date: requestedAt, purchaseId: id, clinicId: plan.clinicId, medicineId: plan.medicineId, medicineName: group.medicineName, quantity: plan.quantity, status: plan.status, simulated: true });
       if (receiptDate && plan.receivedQty > 0) {
@@ -184,7 +208,7 @@ export function createHistoricalDemoData(state) {
           id: `${id}-DELIVERY`, type: 'purchase_delivery', date: receiptDate, purchaseId: id,
           clinicId: plan.clinicId, medicineId: plan.medicineId, medicineName: group.medicineName,
           quantity: plan.receivedQty, unit: group.unit, unitPrice: plan.unitPrice,
-          actualExpense: plan.receivedQty * plan.unitPrice, batchNo: `HDEL-${id}`, simulated: true,
+          ...purchase.deliveries[0], unitPrice: plan.unitPrice, actualExpense: purchase.actualExpense, batchNo: `HDEL-${id}`, simulated: true,
         };
         addTransaction(receipt);
       }
@@ -288,6 +312,33 @@ export function createHistoricalDemoData(state) {
 }
 
 export function withHistoricalDemoData(state) {
-  if (state.historicalDemo && Array.isArray(state.historicalDemo.transactions)) return state;
+  if (state.historicalDemo && Array.isArray(state.historicalDemo.transactions)) {
+    const history = state.historicalDemo;
+    let changed = false;
+    const purchases = (history.purchases || []).map((purchase) => {
+      const deliveries = (purchase.deliveries || []).map((delivery) => {
+        if (delivery.discountPercent != null || !delivery.expiry) return delivery;
+        const pricing = calculateBatchDiscount({ expiry: delivery.expiry }, purchase.unitPrice, delivery.date, DEFAULT_DISCOUNT_CONFIG);
+        changed = true;
+        return { ...delivery, ...pricing, discountTotal: Math.round(delivery.quantity * pricing.discountAmount * 100) / 100,
+          actualExpense: discountedTotal(delivery.quantity, pricing), simulated: true };
+      });
+      if (deliveries.length === (purchase.deliveries || []).length && deliveries.every((delivery, index) => delivery === purchase.deliveries[index])) return purchase;
+      return { ...purchase, deliveries, actualExpense: deliveries.reduce((sum, delivery) => sum + (delivery.actualExpense || 0), 0),
+        discountAmount: deliveries.reduce((sum, delivery) => sum + (delivery.discountTotal || 0), 0) };
+    });
+    const transfers = (history.transfers || []).map((transfer) => {
+      if (transfer.pricing) return transfer;
+      const batch = (state.batches || []).find((item) => item.batchNo === transfer.batchNo && item.medicineId === transfer.medicineId);
+      if (!batch) return transfer;
+      const pricing = calculateBatchDiscount({ expiry: transfer.expiry || batch.expiry }, batch.unitCost, transfer.requestDate || transfer.date, DEFAULT_DISCOUNT_CONFIG);
+      changed = true;
+      return { ...transfer, expiry: transfer.expiry || batch.expiry, pricing,
+        originalValue: transfer.quantity * pricing.originalUnitPrice,
+        discountTotal: Math.round(transfer.quantity * pricing.discountAmount * 100) / 100,
+        discountedValue: discountedTotal(transfer.quantity, pricing), simulated: true };
+    });
+    return changed ? { ...state, historicalDemo: { ...history, purchases, transfers } } : state;
+  }
   return { ...state, historicalDemo: createHistoricalDemoData(state) };
 }

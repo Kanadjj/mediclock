@@ -106,7 +106,9 @@ test('historical purchase statuses and actual expenses reflect confirmed deliver
   assert.deepEqual(new Set(history.purchases.map((p) => p.status)), new Set(['Received', 'Rejected', 'Partially Received', 'Approved', 'Order Placed', 'Pending Approval']));
   for (const purchase of history.purchases) {
     assert.equal(purchase.estimatedCost, purchase.quantity * purchase.unitPrice);
-    assert.equal(purchase.actualExpense, purchase.receivedQty * purchase.unitPrice);
+    assert.equal(purchase.actualExpense, purchase.deliveries.reduce((sum, delivery) => sum + delivery.actualExpense, 0));
+    assert.equal(purchase.discountAmount || 0, purchase.deliveries.reduce((sum, delivery) => sum + delivery.discountTotal, 0));
+    assert.ok(purchase.deliveries.every((delivery) => delivery.originalValue - delivery.discountTotal === delivery.actualExpense));
     assert.equal(purchase.deliveries.reduce((sum, d) => sum + d.quantity, 0), purchase.receivedQty);
     const delivery = history.transactions.find((t) => t.id === `${purchase.id}-DELIVERY`);
     assert.equal(delivery?.quantity || 0, purchase.receivedQty);

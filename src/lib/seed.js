@@ -1,6 +1,7 @@
 // Synthetic demo data. Every clinic, user and quantity here is fictional.
 import { addDays } from './logic.js';
 import { withHistoricalDemoData } from './historical.js';
+import { DEFAULT_DISCOUNT_CONFIG } from './discounts.js';
 
 export const CLINICS = [
   { id: 'A', name: 'Clinic A – Andheri', area: 'Andheri West', lat: 19.1197, lng: 72.8464 },
@@ -63,7 +64,7 @@ export function seedData(today) {
   ];
   const data = {
     version: 1, createdAt: new Date().toISOString(), clinics: structuredClone(CLINICS), users, batches, transfers: [], audit: [],
-    reorderSettings: [], purchases: [], notifications: [],
+    reorderSettings: [], purchases: [], notifications: [], discountConfig: structuredClone(DEFAULT_DISCOUNT_CONFIG),
     activity: [{ id: 'ACT-0', ts: new Date().toISOString(), type: 'system', text: 'Demo dataset loaded (fictional data).' }],
     seq: { transfer: 1, batch: batches.length + 1, activity: 1, clinic: 6, user: 8, purchase: 1, notification: 1 },
   };

@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
 import { useStore } from '../store.jsx';
-import { Badge, Empty, Field, Section, Stat, inr, num } from '../components/ui.jsx';
-import { addDays, availableReorderStock, configureReorder, PURCHASE_ACTIVE, purchaseAction } from '../lib/logic.js';
+import { Badge, Empty, Field, Section, Stat, inr, inrPrecise, num } from '../components/ui.jsx';
+import { addDays, availableReorderStock, configureReorder, isValidDate, PURCHASE_ACTIVE, purchaseAction } from '../lib/logic.js';
+import { calculateBatchDiscount, DEFAULT_DISCOUNT_CONFIG } from '../lib/discounts.js';
 
 const blankSetting = (clinicId) => ({ clinicId, medicineId: '', threshold: '', reorderQuantity: '', unitPrice: '', supplier: '', supplierContact: '', active: true });
 
@@ -20,6 +21,8 @@ function ActionForm({ item, action, today, onClose }) {
     }[action]);
     if (r.error) setError(r.error); else onClose();
   };
+  const preview = action === 'receive' && isValidDate(values.expiry)
+    ? calculateBatchDiscount({ expiry: values.expiry }, item.unitPrice, today, item.discountConfigSnapshot || DEFAULT_DISCOUNT_CONFIG) : null;
   const labels = { approve: 'Approve request', reject: 'Reject request', place: 'Mark order placed', receive: 'Confirm delivery', cancel: 'Cancel request' };
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center bg-navy-950/50 p-0 sm:items-center sm:p-4">
@@ -31,6 +34,11 @@ function ActionForm({ item, action, today, onClose }) {
             <Field label={`Quantity received (${item.unit})`}><input className="input" type="number" min="1" max={item.quantity - item.receivedQty} step="1" required value={values.quantity} onChange={(e) => setValues({ ...values, quantity: e.target.value })} /></Field>
             <Field label="Supplier batch number"><input className="input" required value={values.batchNo} onChange={(e) => setValues({ ...values, batchNo: e.target.value })} /></Field>
             <Field label="Expiry date"><input className="input" type="date" min={today} required value={values.expiry} onChange={(e) => setValues({ ...values, expiry: e.target.value })} /></Field>
+            {preview ? <div className="rounded-md bg-teal-50 p-3 text-sm text-slate-800 sm:col-span-2">
+              <div>{preview.eligible ? `${preview.remainingDays} days remaining · ${preview.discountPercent}% expiry discount` : 'Expired batch — not eligible for discount'}</div>
+              <div className="mt-1">Original {inrPrecise(preview.originalUnitPrice)}/unit · Discount {inrPrecise(preview.discountAmount)}/unit · Final {inrPrecise(preview.finalUnitPrice)}/unit</div>
+              <div className="font-medium">Estimated receipt value: {inr(Number(values.quantity || 0) * preview.finalUnitPrice)}</div>
+            </div> : <p className="text-sm text-amber-700">Enter a valid expiry date to preview discount pricing.</p>}
           </>}
           {['reject', 'cancel'].includes(action) && <Field label="Reason"><textarea className="input" rows="3" required value={values.reason} onChange={(e) => setValues({ ...values, reason: e.target.value })} /></Field>}
           {action === 'approve' && <Field label="Approval note (optional)"><textarea className="input" rows="2" value={values.note} onChange={(e) => setValues({ ...values, note: e.target.value })} /></Field>}
@@ -95,7 +103,7 @@ export default function PurchaseManagement() {
         <Stat label="Pending approvals" value={metrics.approvals} tone="amber" />
         <Stat label="Orders awaiting delivery" value={metrics.delivery} tone="teal" />
         <Stat label="Estimated pending value" value={inr(metrics.estimated)} sub="Outstanding quantities; not paid" tone="amber" />
-        <Stat label="Actual purchase expenses" value={inr(metrics.actual)} sub="Confirmed deliveries only" tone="green" />
+        <Stat label="Actual purchase expenses" value={inr(metrics.actual)} sub="Modeled from confirmed receipts" tone="green" />
       </div>
 
       {canConfigure && <Section title="Medicine reorder settings">
@@ -119,18 +127,18 @@ export default function PurchaseManagement() {
       <Section title="Purchase requests and orders">
         <div className="overflow-x-auto"><table className="w-full min-w-[70rem]"><thead className="border-b bg-slate-50"><tr>{['Request', 'Medicine / clinic', 'Requested', 'Supplier', 'Estimated', 'Actual expense', 'Requested date', 'Status', 'Actions'].map((h) => <th className="th" key={h}>{h}</th>)}</tr></thead>
           <tbody className="divide-y">{purchases.map((p) => <tr key={p.id} className="align-top">
-            <td className="td"><span className="font-medium">{p.id}</span><details className="mt-1 text-xs text-black"><summary className="cursor-pointer">History / delivery</summary><ul className="mt-2 space-y-1">{(p.history || []).map((h, i) => <li key={i}>{h.status} · {h.by} · {new Date(h.at).toLocaleString('en-IN')}{h.note ? ` — ${h.note}` : ''}</li>)}{(p.deliveries || []).map((d, i) => <li key={`d-${i}`}>Delivery: {d.quantity} {p.unit}, batch {d.batchNo}, expiry {d.expiry}, {d.date} · {d.confirmedBy}</li>)}</ul>{p.rejectionReason && <p>Rejection: {p.rejectionReason}</p>}{p.cancellationReason && <p>Cancellation: {p.cancellationReason}</p>}</details></td>
+            <td className="td"><span className="font-medium">{p.id}</span><details className="mt-1 text-xs text-black"><summary className="cursor-pointer">History / delivery</summary><ul className="mt-2 space-y-1">{(p.history || []).map((h, i) => <li key={i}>{h.status} · {h.by} · {new Date(h.at).toLocaleString('en-IN')}{h.note ? ` — ${h.note}` : ''}</li>)}{(p.deliveries || []).map((d, i) => <li key={`d-${i}`}>Delivery: {d.quantity} {p.unit}, batch {d.batchNo}, expiry {d.expiry}, {d.date} · {d.confirmedBy}. Original {inrPrecise(d.originalUnitPrice ?? p.unitPrice)}/unit, {d.discountPercent ?? 0}% discount ({inrPrecise(d.discountAmount || 0)}/unit), final {inrPrecise(d.finalUnitPrice ?? p.unitPrice)}/unit; total {inrPrecise(d.actualExpense ?? d.quantity * p.unitPrice)}, saved {inrPrecise(d.discountTotal || 0)}.</li>)}</ul>{p.rejectionReason && <p>Rejection: {p.rejectionReason}</p>}{p.cancellationReason && <p>Cancellation: {p.cancellationReason}</p>}</details></td>
             <td className="td">{p.medicineName}<div className="text-xs text-black">{clinicName(p.clinicId)}</div></td>
             <td className="td">{num(p.quantity)} {p.unit}<div className="text-xs text-black">{num(p.receivedQty || 0)} received</div></td>
             <td className="td">{p.supplier}{p.supplierContact && <div className="text-xs text-black">{p.supplierContact}</div>}</td>
-            <td className="td">{inr(p.estimatedCost)}</td><td className="td">{inr(p.actualExpense || 0)}</td>
+            <td className="td">{inr(p.estimatedCost)}<div className="text-xs text-black">Before batch discount</div></td><td className="td">{inr(p.actualExpense || 0)}{p.discountAmount > 0 && <div className="text-xs text-teal-700">{inr(p.discountAmount)} saved</div>}</td>
             <td className="td whitespace-nowrap">{new Date(p.requestedAt).toLocaleDateString('en-IN')}</td>
             <td className="td"><Badge tone={p.status}>{p.status}</Badge>{p.approvedBy && <div className="mt-1 text-xs text-black">Approved by {p.approvedBy}</div>}{p.placedAt && <div className="mt-1 text-xs text-black">Placed {new Date(p.placedAt).toLocaleDateString('en-IN')}</div>}</td>
             <td className="td"><div className="flex flex-wrap gap-1">{actionFor(p).map(([a, label]) => <button key={a} className={['reject', 'cancel'].includes(a) ? 'btn-ghost !px-2 !py-1 text-red-700' : 'btn-teal !px-2 !py-1'} onClick={() => a === 'place' ? run((s) => purchaseAction(s, p.id, a, user, today), 'Order marked as placed') : setAction({ item: p, action: a })}>{label}</button>)}</div></td>
           </tr>)}</tbody>
         </table></div>
         {purchases.length === 0 && <Empty title="No purchase requests yet" hint="An automatic request appears here when configured available stock reaches its threshold." />}
-        <div className="border-t px-4 py-2 text-xs text-black">Estimated cost = requested quantity × unit price. Actual expense = confirmed received quantity × unit price. Receipts create or increase inventory batches; pending estimates are not expenses.</div>
+        <div className="border-t px-4 py-2 text-xs text-black">Estimated value uses the agreed unit price before batch discounts. The modeled expense uses only confirmed received quantities at their saved discounted batch prices. Discounts are finalized when delivery batch and expiry are recorded; no supplier payments are processed.</div>
       </Section>
       {action && <ActionForm item={action.item} action={action.action} today={today} onClose={() => setAction(null)} />}
     </div>

@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useStore } from '../store.jsx';
-import { Badge, Confirm, Empty, Modal, Section, fmtDate, fmtTime } from '../components/ui.jsx';
+import { Badge, Confirm, Empty, Modal, Section, fmtDate, fmtTime, inrPrecise } from '../components/ui.jsx';
 import { availableActions, transferAction, verifyAudit } from '../lib/logic.js';
 
 const STEPS = ['Awaiting sending approval', 'Awaiting receiving approval', 'Awaiting medical officer approval', 'Approved', 'Dispatched', 'Completed'];
@@ -44,6 +44,10 @@ export default function Transfers() {
                   <div><div className="text-xs text-black">{t.id} · raised {fmtTime(t.createdAt)}</div><h3 className="font-semibold text-navy-900">{t.qty} {t.unit} {t.medicineName}</h3><div className="text-sm text-black">{cname(t.fromClinic)} → {cname(t.toClinic)} · batch {t.batchNo} · expires {fmtDate(t.expiry)}</div></div>
                   <Badge>{t.status}</Badge>
                 </div>
+                {t.pricing && <div className="mt-2 rounded-md bg-teal-50 p-2 text-sm text-slate-800">
+                  {t.pricing.remainingDays} days remaining · Original {inrPrecise(t.pricing.originalUnitPrice)}/unit · {t.pricing.discountPercent}% discount · Discounted {inrPrecise(t.pricing.finalUnitPrice)}/unit
+                  <div className="text-xs">Estimated transfer value {inrPrecise(t.discountedValue)} (illustrative, not a payment)</div>
+                </div>}
                 <div className="mt-3"><Stepper status={t.status} /></div>
                 <div className="mt-3 flex flex-wrap items-center gap-2">
                   {acts.map((a) => <button key={a} className={a === 'approve' || a === 'dispatch' || a === 'receive' ? 'btn-teal' : DANGER.includes(a) ? 'btn-ghost text-red-700' : 'btn-ghost'} onClick={() => setAsk({ t, a })}>{LABEL[a]}</button>)}

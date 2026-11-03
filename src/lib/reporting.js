@@ -4,6 +4,8 @@ export function summarizeHistoricalPurchasesAndTransfers(history, clinicScope = 
   const byMonth = new Map(months.map((month) => [month, {
     month, requests: 0, quantityOrdered: 0, quantityReceived: 0, actualExpense: 0,
     completedTransfers: 0, quantityTransferred: 0, statuses: {},
+    purchaseDiscount: 0, transferDiscount: 0, purchaseOriginalValue: 0, purchaseDiscountedValue: 0,
+    transferOriginalValue: 0, transferDiscountedValue: 0,
   }]));
   const inScope = (clinicId) => clinicScope === 'all' || clinicId === clinicScope;
   const purchases = (history?.purchases || []).filter((p) => inScope(p.clinicId));
@@ -24,8 +26,14 @@ export function summarizeHistoricalPurchasesAndTransfers(history, clinicScope = 
         const monthSummary = byMonth.get((delivery.date || '').slice(0, 7));
         if (!monthSummary) continue;
         const quantity = Number(delivery.quantity) || 0;
+        const originalValue = Number(delivery.originalValue ?? (quantity * (Number(delivery.originalUnitPrice ?? purchase.unitPrice) || 0)));
+        const discount = Number(delivery.discountTotal ?? (quantity * (Number(delivery.discountAmount) || 0)));
+        const actualExpense = Number(delivery.actualExpense ?? (quantity * (Number(delivery.finalUnitPrice ?? purchase.unitPrice) || 0)));
         monthSummary.quantityReceived += quantity;
-        monthSummary.actualExpense += quantity * (Number(purchase.unitPrice) || 0);
+        monthSummary.actualExpense += actualExpense;
+        monthSummary.purchaseDiscount += discount;
+        monthSummary.purchaseOriginalValue += originalValue;
+        monthSummary.purchaseDiscountedValue += actualExpense;
       }
     } else if (Number(purchase.receivedQty) > 0) {
       const deliveryDate = purchase.deliveryDate || purchase.completedAt || purchase.requestedAt || purchase.date;
@@ -33,7 +41,10 @@ export function summarizeHistoricalPurchasesAndTransfers(history, clinicScope = 
       if (monthSummary) {
         const quantity = Number(purchase.receivedQty) || 0;
         monthSummary.quantityReceived += quantity;
-        monthSummary.actualExpense += Number(purchase.actualExpense) || quantity * (Number(purchase.unitPrice) || 0);
+        const actualExpense = Number(purchase.actualExpense) || quantity * (Number(purchase.unitPrice) || 0);
+        monthSummary.actualExpense += actualExpense;
+        monthSummary.purchaseOriginalValue += quantity * (Number(purchase.unitPrice) || 0);
+        monthSummary.purchaseDiscountedValue += actualExpense;
       }
     }
   }
@@ -50,6 +61,10 @@ export function summarizeHistoricalPurchasesAndTransfers(history, clinicScope = 
     const quantity = Number(transfer.quantity ?? transfer.qty) || 0;
     monthSummary.completedTransfers += 1;
     monthSummary.quantityTransferred += quantity;
+    monthSummary.transferDiscount += Number(transfer.discountTotal ?? 0);
+    monthSummary.transferOriginalValue += Number(transfer.originalValue ?? (quantity * (Number(transfer.pricing?.originalUnitPrice ?? transfer.unitCost) || 0)));
+    monthSummary.transferDiscountedValue += Number(transfer.discountedValue
+      ?? (quantity * (Number(transfer.pricing?.finalUnitPrice ?? transfer.unitCost) || 0)));
     transfers.push({ ...transfer, reportDate: date, quantity });
   }
 
@@ -66,10 +81,32 @@ export function summarizeHistoricalPurchasesAndTransfers(history, clinicScope = 
     medicineTotals.set(key, item);
   }
 
+  const medicineDiscounts = new Map();
+  const discountRow = (id, name) => {
+    const key = id || name;
+    if (!medicineDiscounts.has(key)) medicineDiscounts.set(key, { medicineId: id, medicineName: name, purchaseDiscount: 0, transferDiscount: 0 });
+    return medicineDiscounts.get(key);
+  };
+  for (const purchase of purchases) for (const delivery of purchase.deliveries || []) {
+    const row = discountRow(purchase.medicineId, purchase.medicineName);
+    row.purchaseDiscount += Number(delivery.discountTotal) || 0;
+  }
+  for (const transfer of transfers) {
+    const row = discountRow(transfer.medicineId, transfer.medicineName);
+    row.transferDiscount += Number(transfer.discountTotal) || 0;
+  }
+  const totals = [...byMonth.values()].reduce((sum, row) => {
+    sum.purchaseDiscount += row.purchaseDiscount; sum.transferDiscount += row.transferDiscount;
+    sum.purchaseOriginalValue += row.purchaseOriginalValue; sum.purchaseDiscountedValue += row.purchaseDiscountedValue;
+    sum.transferOriginalValue += row.transferOriginalValue; sum.transferDiscountedValue += row.transferDiscountedValue;
+    return sum;
+  }, { purchaseDiscount: 0, transferDiscount: 0, purchaseOriginalValue: 0, purchaseDiscountedValue: 0, transferOriginalValue: 0, transferDiscountedValue: 0 });
   return {
     months: months.map((month) => byMonth.get(month)),
     transfers,
     medicineTotals: [...medicineTotals.values()].sort((a, b) => a.medicineName.localeCompare(b.medicineName)),
+    medicineDiscounts: [...medicineDiscounts.values()].sort((a, b) => a.medicineName.localeCompare(b.medicineName)),
+    discountTotals: totals,
     purchaseRecords: purchases,
   };
 }

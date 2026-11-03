@@ -1,8 +1,9 @@
 import React, { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useStore } from '../store.jsx';
-import { Badge, Empty, Field, Modal, fmtDate } from '../components/ui.jsx';
+import { Badge, Empty, Field, Modal, fmtDate, inrPrecise } from '../components/ui.jsx';
 import { clinicMedSummary, createTransfer, explainRecommendation, projection, SAFETY_MARGIN_DAYS } from '../lib/logic.js';
+import { calculateBatchDiscount } from '../lib/discounts.js';
 
 function Row({ k, v }) { return <div><div className="text-xs text-black">{k}</div><div className="text-sm font-medium text-slate-800">{v}</div></div>; }
 
@@ -22,6 +23,11 @@ function RequestModal({ rec, onClose }) {
     <Modal title="Raise transfer request" onClose={onClose}>
       <form onSubmit={submit} className="space-y-3">
         <p className="text-sm text-black">{rec.medicineName}, batch {rec.batchNo}. Stock stays where it is until receipt is confirmed.</p>
+        <div className="rounded-md bg-teal-50 p-3 text-sm text-slate-800">
+          <div>Expires {fmtDate(rec.expiry)} · {rec.days} days remaining</div>
+          <div>Original {inrPrecise(rec.unitCost)}/unit · {rec.discountPercent}% expiry discount · Transfer unit value {inrPrecise(rec.finalUnitPrice)}</div>
+          <div>Estimated value for {qty} {rec.unit}: {inrPrecise(Number(qty) * rec.finalUnitPrice)}</div>
+        </div>
         <Field label={`Quantity (${rec.unit})`} error={err} hint={`Recommended ${rec.qty}`}><input autoFocus className="input" type="number" min="1" max={rec.qty} value={qty} onChange={(e) => setQty(e.target.value)} /></Field>
         <div className="flex justify-end gap-2"><button type="button" className="btn-ghost" onClick={onClose}>Cancel</button><button className="btn-teal">Send for approval</button></div>
       </form>
@@ -36,7 +42,12 @@ export default function SwapBoard() {
   const [req, setReq] = useState(null);
   const cname = (id) => state.clinics.find((c) => c.id === id)?.name || id;
   const meds = useMemo(() => [...new Map(state.batches.map((b) => [b.medicineId, b.name])).entries()], [state.batches]);
-  const list = recs.filter((r) => (scope === 'all' || r.fromClinic === scope || r.toClinic === scope) && (f.med === 'all' || r.medicineId === f.med)
+  const list = recs.map((r) => {
+    const batch = state.batches.find((b) => b.id === r.batchId);
+    const saved = r.transferId ? state.transfers.find((t) => t.id === r.transferId)?.pricing : null;
+    const pricing = saved || (batch ? calculateBatchDiscount(batch, batch.unitCost, today, state.discountConfig) : null);
+    return { ...r, unitCost: pricing?.originalUnitPrice ?? batch?.unitCost ?? 0, discountPercent: pricing?.discountPercent || 0, finalUnitPrice: pricing?.finalUnitPrice ?? batch?.unitCost ?? 0 };
+  }).filter((r) => (scope === 'all' || r.fromClinic === scope || r.toClinic === scope) && (f.med === 'all' || r.medicineId === f.med)
     && (f.urgency === 'all' || r.urgency === f.urgency) && (f.status === 'all' || r.status === f.status));
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
 
@@ -80,6 +91,7 @@ export default function SwapBoard() {
                   <Row k="Recommended quantity" v={<span className="text-brand-700">{r.qty} {r.unit}</span>} />
                   <Row k="Confirmed transferable" v={confirmed ? `${confirmed} ${r.unit}` : 'None until approved'} />
                   <Row k="Batch expiry" v={`${fmtDate(r.expiry)} (${r.days} d)`} />
+                  <Row k="Discounted transfer value" v={`${inrPrecise(r.finalUnitPrice)}/unit · ${r.discountPercent}%`} />
                   <Row k="Distance" v={`${r.distanceKm} km`} />
                   <Row k="Est. travel time" v={`${r.travelMin} min`} />
                   <Row k="Transfer deadline" v={fmtDate(r.deadline)} />

@@ -109,6 +109,9 @@ export const fmtDate = (iso) => iso;
 export const fmtLongDate = (iso) => new Date(iso + 'T00:00:00Z').toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', timeZone: 'UTC' });
 export const fmtTime = (ts) => new Date(ts).toLocaleString('en-IN', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
 export const inr = (n) => '₹' + Math.round(n).toLocaleString('en-IN');
+export const inrPrecise = (n) => new Intl.NumberFormat('en-IN', {
+  style: 'currency', currency: 'INR', minimumFractionDigits: 2, maximumFractionDigits: 2,
+}).format(Number(n) || 0);
 export const num = (n) => Math.round(n).toLocaleString('en-IN');
 
 export function downloadCSV(filename, rows) {
