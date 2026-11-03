@@ -1,5 +1,6 @@
 // MediClock core logic. Pure functions, no React, no browser APIs. All data is fictional.
 import { DEFAULT_DISCOUNT_CONFIG, calculateBatchDiscount, discountedTotal, validateDiscountTiers } from './discounts.js';
+import { attachDefaultCredentials } from './auth.js';
 
 export const DAY_MS = 86400000;
 export const SAFETY_MARGIN_DAYS = 3; // transfer must land this many days before expiry
@@ -259,7 +260,7 @@ export function migrateStateData(data) {
   return {
     ...data,
     clinics: Array.isArray(data.clinics) ? data.clinics : [],
-    users: Array.isArray(data.users) ? data.users : [],
+    users: attachDefaultCredentials(Array.isArray(data.users) ? data.users : []),
     transfers: Array.isArray(data.transfers) ? data.transfers : [],
     audit: Array.isArray(data.audit) ? data.audit : [],
     activity: Array.isArray(data.activity) ? data.activity : [],

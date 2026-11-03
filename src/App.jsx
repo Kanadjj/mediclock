@@ -68,7 +68,7 @@ function DemoBanner({ today }) {
 }
 
 function Shell({ children }) {
-  const { user, state, login, reset, scope, setScope, notify, today } = useStore();
+  const { user, state, logout, reset, scope, setScope, notify, today } = useStore();
   const nav = useNavigate();
   const loc = useLocation();
   const [confirmReset, setConfirmReset] = useState(false);
@@ -111,10 +111,9 @@ function Shell({ children }) {
               ))}
             </nav>
             <div className="ml-auto flex items-center gap-2">
-              <select className="input !w-auto max-w-[16rem]" aria-label="Switch demo user" value={user.id} onChange={(e) => login(e.target.value)}>
-                {state.users.map((u) => <option key={u.id} value={u.id}>{u.role === 'Pharmacist' ? `Pharmacist – ${u.name}` : `${u.role} – ${u.name}`}</option>)}
-              </select>
+              <span className="max-w-[13rem] truncate text-xs font-medium text-navy-900">{user.name} · {user.role}</span>
               <Notifications />
+              <button className="btn-ghost" onClick={logout}>Log out</button>
             </div>
           </div>
         </div>
@@ -136,7 +135,7 @@ function Toast() {
 export default function App() {
   const { user, storageError } = useStore();
   const loc = useLocation();
-  if (!user) return <><Login /><Toast /></>;
+  if (!user) return <><Routes><Route path="/login" element={<Login />} /><Route path="*" element={<Navigate to="/login" replace />} /></Routes><Toast /></>;
   return (
     <Shell>
       {storageError && <div className="mb-3 rounded-md bg-red-50 p-3 text-sm text-red-700">Browser storage is unavailable or full, so changes will not survive a refresh.</div>}

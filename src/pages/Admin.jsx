@@ -3,16 +3,43 @@ import { useStore } from '../store.jsx';
 import { Confirm, Field, Section } from '../components/ui.jsx';
 import { addClinic, addUser, configureDiscounts, resetDiscounts } from '../lib/logic.js';
 import { DEFAULT_DISCOUNT_CONFIG } from '../lib/discounts.js';
+import { issueDemoPassword, setDemoAccountActive } from '../lib/auth.js';
 
 export default function Admin() {
-  const { state, user, run, reset } = useStore();
+  const { state, user, run, runAsync, reset } = useStore();
   const [c, setC] = useState({ name: '', area: '', lat: '', lng: '' });
   const [u, setU] = useState({ name: '', role: 'Pharmacist', clinicId: state.clinics[0]?.id || '' });
   const [confirmReset, setConfirmReset] = useState(false);
   const [tiers, setTiers] = useState(() => structuredClone(state.discountConfig?.tiers || DEFAULT_DISCOUNT_CONFIG.tiers));
+  const [issuedCredential, setIssuedCredential] = useState(null);
+  const [userError, setUserError] = useState('');
   const cname = (id) => state.clinics.find((x) => x.id === id)?.name || 'All clinics';
   const submitC = (e) => { e.preventDefault(); const r = run((s) => addClinic(s, c, user), 'Clinic added'); if (!r.error) setC({ name: '', area: '', lat: '', lng: '' }); };
-  const submitU = (e) => { e.preventDefault(); const r = run((s) => addUser(s, u, user), 'User added'); if (!r.error) setU({ ...u, name: '' }); };
+  const submitU = async (e) => {
+    e.preventDefault();
+    setUserError('');
+    setIssuedCredential(null);
+    const result = await runAsync(async (s) => {
+      const added = addUser(s, u, user);
+      if (added.error) return added;
+      const created = added.state.users[added.state.users.length - 1];
+      return issueDemoPassword(added.state, created.id, user);
+    }, 'User created. Share the generated password securely.');
+    if (!result.error) {
+      setU({ ...u, name: '' });
+      setIssuedCredential(result.credential);
+    } else setUserError(result.error);
+  };
+  const resetPassword = async (account) => {
+    setIssuedCredential(null);
+    const result = await runAsync((s) => issueDemoPassword(s, account.id, user), 'A new one-time password was generated.');
+    if (!result.error) setIssuedCredential(result.credential);
+  };
+  const toggleAccount = (account) => {
+    const result = run((s) => setDemoAccountActive(s, account.id, !account.auth?.active, user),
+      account.auth?.active ? 'Demo account deactivated' : 'Demo account activated');
+    if (result.error) setUserError(result.error);
+  };
   const saveDiscounts = (e) => { e.preventDefault(); run((s) => configureDiscounts(s, tiers, user), 'Expiry discount rules saved'); };
   const restoreDiscounts = () => {
     const r = run((s) => resetDiscounts(s, user), 'Default expiry discount rules restored');
@@ -32,14 +59,35 @@ export default function Admin() {
             <div className="sm:col-span-2"><button className="btn-primary">Add clinic</button></div>
           </form>
         </Section>
-        <Section title="Users">
-          <ul className="divide-y">{state.users.map((x) => <li key={x.id} className="px-4 py-2 text-sm">{x.name}<div className="text-xs text-black">{x.role} · {cname(x.clinicId)}</div></li>)}</ul>
+        <Section title="User management">
           <form onSubmit={submitU} className="grid gap-2 border-t p-4 sm:grid-cols-2">
             <Field label="Name"><input className="input" value={u.name} onChange={(e) => setU({ ...u, name: e.target.value })} /></Field>
             <Field label="Role"><select className="input" value={u.role} onChange={(e) => setU({ ...u, role: e.target.value })}>{['Pharmacist', 'Medical Officer', 'Administrator'].map((r) => <option key={r}>{r}</option>)}</select></Field>
             {u.role === 'Pharmacist' && <Field label="Clinic"><select className="input" value={u.clinicId} onChange={(e) => setU({ ...u, clinicId: e.target.value })}>{state.clinics.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}</select></Field>}
             <div className="sm:col-span-2"><button className="btn-primary">Add user</button></div>
+            {userError && <p role="alert" className="sm:col-span-2 text-sm text-red-600">{userError}</p>}
           </form>
+          {issuedCredential && <div className="mx-4 mb-4 rounded-md border border-teal-300 bg-teal-50 p-3 text-sm text-slate-800">
+            <div className="font-semibold">One-time demo credential — copy it now</div>
+            <div className="mt-1">Name: {issuedCredential.name} · Login ID: <code>{issuedCredential.loginId}</code> · Initial password: <code className="select-all">{issuedCredential.password}</code></div>
+            <p className="mt-1 text-xs">This password is shown only in this screen and is not saved in LocalStorage.</p>
+            <button type="button" className="mt-2 btn-ghost" onClick={() => setIssuedCredential(null)}>Dismiss</button>
+          </div>}
+          <div className="overflow-x-auto border-t">
+            <table className="w-full min-w-[54rem]"><thead className="border-b bg-slate-50"><tr>{['Name', 'Login ID', 'Clinic', 'Role', 'Account', 'Failed attempts', 'Actions'].map((h) => <th className="th" key={h}>{h}</th>)}</tr></thead>
+              <tbody className="divide-y">{state.users.map((account) => <tr key={account.id}>
+                <td className="td">{account.name}</td><td className="td font-mono">{account.auth?.loginId || 'Not assigned'}</td>
+                <td className="td">{cname(account.clinicId)}</td><td className="td">{account.role}</td>
+                <td className="td">{!account.auth?.hash ? 'Password setup required' : account.auth.active ? 'Active' : 'Inactive'}{account.auth?.lockedUntil > Date.now() && <div className="text-xs text-red-700">Temporarily locked</div>}</td>
+                <td className="td tabular-nums">{account.auth?.failedAttempts || 0}</td>
+                <td className="td"><div className="flex flex-wrap gap-1">
+                  <button type="button" className="btn-ghost !px-2 !py-1" onClick={() => resetPassword(account)}>Reset password</button>
+                  {account.auth?.hash && <button type="button" className="btn-ghost !px-2 !py-1" onClick={() => toggleAccount(account)}>{account.auth.active ? 'Deactivate' : 'Activate'}</button>}
+                </div></td>
+              </tr>)}</tbody>
+            </table>
+          </div>
+          <p className="border-t px-4 py-2 text-xs text-black">Passwords are stored as salted PBKDF2 hashes. Admin password resets generate a random password shown once. This frontend-only prototype cannot prevent a browser owner from editing LocalStorage or bypassing role checks.</p>
         </Section>
       </div>
       {user.role === 'Administrator' && <Section title="Expiry-based discount configuration">
