@@ -6,11 +6,39 @@ import { addDays, allSummaries, daysLeft, projection } from '../lib/logic.js';
 
 const STATUS_COLOR = { Normal: '#16a34a', Monitor: '#0ea5e9', Warning: '#d97706', Critical: '#dc2626', Expired: '#7f1d1d' };
 
+const HISTORY_METRICS = [
+  { key: 'consumed', label: 'Consumed', color: '#0f8b8d' },
+  { key: 'wasted', label: 'Wasted', color: '#dc2626' },
+  { key: 'transferred', label: 'Transferred', color: '#0ea5e9' },
+];
+const HISTORY_GRANULARITIES = [['weekly', 'Weekly'], ['monthly', 'Monthly'], ['yearly', 'Yearly']];
+const HISTORY_MOVEMENT_TYPES = new Set(['consumption', 'wastage', 'stock_addition', 'purchase_delivery']);
+const weekStartISO = (iso) => {
+  const d = new Date(iso + 'T00:00:00Z');
+  d.setUTCDate(d.getUTCDate() - ((d.getUTCDay() + 6) % 7));
+  return d.toISOString().slice(0, 10);
+};
+const shortDay = (iso) => new Date(iso + 'T00:00:00Z').toLocaleDateString('en-IN', { day: '2-digit', month: 'short', timeZone: 'UTC' });
+const monthLabel = (key) => new Date(key + '-01T00:00:00Z').toLocaleDateString('en-IN', { month: 'short', year: 'numeric', timeZone: 'UTC' });
+const historyKey = (date, granularity) => granularity === 'weekly' ? weekStartISO(date) : granularity === 'yearly' ? date.slice(0, 4) : date.slice(0, 7);
+const historyLabel = (key, granularity) => granularity === 'yearly' ? key : granularity === 'weekly' ? `${shortDay(key)} – ${shortDay(addDays(key, 6))}` : monthLabel(key);
+
+function WeekTick({ x, y, payload }) {
+  const [start, end] = String(payload.value).split(' – ');
+  return (
+    <g transform={`translate(${x},${y})`}>
+      <text x={0} y={0} dy={11} textAnchor="middle" fontSize={10} fill="#000">{start}</text>
+      <text x={0} y={0} dy={23} textAnchor="middle" fontSize={10} fill="#000">{end}</text>
+    </g>
+  );
+}
+
 export default function Reports() {
   const { state, today, scope } = useStore();
   const [from, setFrom] = useState(addDays(today, -90));
   const [to, setTo] = useState(addDays(today, 0));
   const [statusView, setStatusView] = useState(null);
+  const [historyGranularity, setHistoryGranularity] = useState('monthly');
   const cname = (id) => state.clinics.find((c) => c.id === id)?.name || id;
   const r = useMemo(() => {
     const inScope = (id) => scope === 'all' || id === scope;
@@ -51,6 +79,36 @@ export default function Reports() {
     };
   }, [state, today, scope, from, to]);
 
+  const history = useMemo(() => {
+    const data = state.historicalDemo;
+    const inScope = (id) => scope === 'all' || id === scope;
+    const buckets = new Map();
+    const ensure = (date) => {
+      const key = historyKey(date, historyGranularity);
+      if (!buckets.has(key)) buckets.set(key, { key, label: historyLabel(key, historyGranularity), consumed: 0, wasted: 0, added: 0, transferred: 0, purchases: 0 });
+      return buckets.get(key);
+    };
+    (data?.transactions || []).forEach((t) => {
+      if (!inScope(t.clinicId) || !HISTORY_MOVEMENT_TYPES.has(t.type)) return;
+      const row = ensure(t.date);
+      if (t.type === 'consumption') row.consumed += t.quantity;
+      else if (t.type === 'wastage') row.wasted += t.quantity;
+      else if (t.type === 'stock_addition') row.added += t.quantity;
+      else if (t.type === 'purchase_delivery') { row.added += t.quantity; row.purchases += t.actualExpense || 0; }
+    });
+    (data?.transfers || []).forEach((t) => {
+      if (!inScope(t.fromClinic) && !inScope(t.toClinic)) return;
+      ensure(t.date).transferred += t.quantity;
+    });
+    const rows = [...buckets.values()].sort((a, b) => a.key.localeCompare(b.key));
+    const totals = rows.reduce((acc, row) => {
+      acc.consumed += row.consumed; acc.wasted += row.wasted; acc.added += row.added;
+      acc.transferred += row.transferred; acc.purchases += row.purchases;
+      return acc;
+    }, { consumed: 0, wasted: 0, added: 0, transferred: 0, purchases: 0 });
+    return { rows, totals, range: data?.range, label: data?.label };
+  }, [state.historicalDemo, scope, historyGranularity]);
+
   const exportBatches = () => downloadCSV('mediclock_batches.csv', [['Clinic', 'Medicine', 'Batch', 'Quantity', 'Unit', 'Expiry', 'Days left', 'Status', 'Daily use', 'Projected surplus (estimate)', 'Unit cost (illustrative INR)'],
     ...r.withP.map(({ b, p }) => [cname(b.clinicId), b.name, b.batchNo, b.qty, b.unit, b.expiry, p.days, p.status, b.daily, p.surplus, b.unitCost])]);
   const exportTransfers = () => downloadCSV('mediclock_transfers.csv', [['ID', 'Status', 'From', 'To', 'Medicine', 'Batch', 'Quantity', 'Unit', 'Created', 'Completed', 'Estimated value (illustrative INR)'],
@@ -84,6 +142,51 @@ export default function Reports() {
         <Section title="Quantity redistributed by medicine (completed transfers)">{r.movedData.length === 0 ? <Empty title="No completed transfers in this range" hint="Complete a transfer on the Transfers page and it will appear here." /> : <div className="h-64 p-3"><ResponsiveContainer width="100%" height="100%"><BarChart data={r.movedData}><CartesianGrid strokeDasharray="3 3" vertical={false} /><XAxis dataKey="name" fontSize={12} /><YAxis fontSize={12} /><Tooltip /><Legend /><Bar dataKey="units" name="Units moved" fill="#0f8b8d" /></BarChart></ResponsiveContainer></div>}</Section>
         <Section title="Current shortages">{r.shortages.length === 0 ? <Empty title="No shortages" /> : <div className="overflow-x-auto"><table className="w-full"><thead className="border-b bg-slate-50"><tr>{['Clinic', 'Medicine', 'Stock', 'Required', 'Short'].map((h) => <th key={h} className="th">{h}</th>)}</tr></thead><tbody className="divide-y">{r.shortages.map((s) => <tr key={s.clinicId + s.medicineId}><td className="td">{cname(s.clinicId)}</td><td className="td">{s.name}</td><td className="td tabular-nums">{s.stock}</td><td className="td tabular-nums">{s.required}</td><td className="td tabular-nums font-medium text-red-600">{s.shortage}</td></tr>)}</tbody></table></div>}</Section>
       </div>
+      <Section
+        title="Historical comparison (simulated)"
+        action={<div className="flex gap-1" role="group" aria-label="History granularity">{HISTORY_GRANULARITIES.map(([key, label]) => (
+          <button key={key} onClick={() => setHistoryGranularity(key)} aria-pressed={historyGranularity === key}
+            className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${historyGranularity === key ? 'bg-navy-900 text-white' : 'border border-slate-300 bg-white text-black hover:bg-slate-50'}`}>{label}</button>
+        ))}</div>}
+      >
+        <div className="p-3">
+          <p className="mb-2 text-xs text-black">
+            {history.label || 'Simulated historical demo data; not actual clinic records.'}
+            {history.range && <> · {history.range.from} to {history.range.to}</>}
+            {scope !== 'all' && <> · {cname(scope)}</>}
+          </p>
+          {history.rows.length === 0 ? <Empty title="No historical data" hint="No simulated history matches this clinic." /> : (
+            <>
+              <div className="h-72"><ResponsiveContainer width="100%" height="100%"><BarChart data={history.rows}><CartesianGrid strokeDasharray="3 3" vertical={false} /><XAxis dataKey="label" fontSize={11} interval={0} height={historyGranularity === 'weekly' ? 44 : 30} tick={historyGranularity === 'weekly' ? WeekTick : undefined} /><YAxis fontSize={11} /><Tooltip /><Legend />{HISTORY_METRICS.map((m) => <Bar key={m.key} dataKey={m.key} name={m.label} fill={m.color} maxBarSize={48} />)}</BarChart></ResponsiveContainer></div>
+              <div className="mt-3 overflow-x-auto">
+                <table className="w-full min-w-[46rem]">
+                  <thead className="border-b bg-slate-50"><tr>{['Period', 'Consumed', 'Wasted', 'Stock added', 'Transferred', 'Purchases'].map((h) => <th key={h} className="th">{h}</th>)}</tr></thead>
+                  <tbody className="divide-y">
+                    {history.rows.map((row) => (
+                      <tr key={row.key}>
+                        <td className="td whitespace-nowrap">{row.label}</td>
+                        <td className="td tabular-nums">{num(row.consumed)}</td>
+                        <td className="td tabular-nums">{num(row.wasted)}</td>
+                        <td className="td tabular-nums">{num(row.added)}</td>
+                        <td className="td tabular-nums">{num(row.transferred)}</td>
+                        <td className="td tabular-nums">{inr(row.purchases)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                  <tfoot><tr className="border-t">
+                    <td className="td font-medium">Total</td>
+                    <td className="td tabular-nums font-medium">{num(history.totals.consumed)}</td>
+                    <td className="td tabular-nums font-medium">{num(history.totals.wasted)}</td>
+                    <td className="td tabular-nums font-medium">{num(history.totals.added)}</td>
+                    <td className="td tabular-nums font-medium">{num(history.totals.transferred)}</td>
+                    <td className="td tabular-nums font-medium">{inr(history.totals.purchases)}</td>
+                  </tr></tfoot>
+                </table>
+              </div>
+            </>
+          )}
+        </div>
+      </Section>
       {statusView && (() => {
         const rows = r.statusDetail[statusView] || [];
         const total = rows.reduce((s, m) => s + m.units, 0);
