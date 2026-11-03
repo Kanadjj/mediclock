@@ -1,6 +1,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import { seedData } from './lib/seed.js';
 import { todayISO, buildRecommendations, allSummaries, buildAlerts, migrateStateData } from './lib/logic.js';
+import { withHistoricalDemoData } from './lib/historical.js';
 
 const DATA_KEY = 'mediclock.data.v1';
 const SESSION_KEY = 'mediclock.session.v1';
@@ -11,7 +12,7 @@ export const useStore = () => useContext(Ctx);
 function load() {
   try {
     const raw = localStorage.getItem(DATA_KEY);
-    if (raw) { const d = migrateStateData(JSON.parse(raw)); if (d) return d; }
+    if (raw) { const d = migrateStateData(JSON.parse(raw)); if (d) return withHistoricalDemoData(d); }
   } catch { /* corrupted storage: fall through to seed */ }
   return seedData(todayISO());
 }

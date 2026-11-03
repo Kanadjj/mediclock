@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "node tests/logic.test.mjs && node tests/purchase.test.mjs"
+    "test": "node tests/logic.test.mjs && node tests/purchase.test.mjs && node tests/historical.test.mjs"
   },
   "dependencies": {
     "firebase": "^10.14.1",
