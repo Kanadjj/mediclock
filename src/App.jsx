@@ -10,6 +10,7 @@ import NetworkMap from './pages/NetworkMap.jsx';
 import Reports from './pages/Reports.jsx';
 import Admin from './pages/Admin.jsx';
 import PurchaseManagement from './pages/PurchaseManagement.jsx';
+import MediWasteManagement from './pages/MediWasteManagement.jsx';
 import Login from './pages/Login.jsx';
 import { markNotificationRead } from './lib/logic.js';
 
@@ -25,6 +26,7 @@ const SECONDARY = [
   { to: '/purchases', label: 'Purchases' },
   { to: '/map', label: 'Clinic map' },
   { to: '/reports', label: 'Reports' },
+  { to: '/medi-waste', label: 'MediWaste Management' },
   { to: '/admin', label: 'Administration', roles: ['Administrator'] },
 ];
 
@@ -147,6 +149,7 @@ export default function App() {
         <Route path="/purchases" element={<PurchaseManagement />} />
         <Route path="/map" element={<NetworkMap />} />
         <Route path="/reports" element={<Reports />} />
+        <Route path="/medi-waste" element={<MediWasteManagement />} />
         <Route path="/admin" element={user.role === 'Administrator' ? <Admin /> : <Navigate to="/" replace />} />
         <Route path="/login" element={<Navigate to="/" replace />} />
         <Route path="*" element={<Navigate to="/" replace />} />
